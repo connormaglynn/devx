@@ -1,14 +1,45 @@
+from __future__ import annotations
+
 import os
 import subprocess
-from types import SimpleNamespace
-from github import Github
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from typing import Any, Optional
+
+from github import Github
+from requests import Session
+
+
+@dataclass(frozen=True)
+class TemplateRepoHit:
+    repo_full_name: str
+    repo_url: str
+    template_full_name: str
+    template_url: str
 
 
 class GitHubService:
     def __init__(self, token: str | None = None):
         self.token = token or self.__get_token()
         self.client = Github(self.token)
+        self.rest_client = Session()
+        self.rest_client.headers.update(
+            {
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {token}",
+            }
+        )
+        self.graphql_client = Session()
+        self.graphql_client.headers.update(
+            {
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": "application/json",
+            }
+        )
+
+        self.graphql_url = "https://api.github.com/graphql"
 
     def __get_token(self) -> str:
         token = os.getenv("GITHUB_TOKEN")
@@ -16,7 +47,10 @@ class GitHubService:
             return token
 
         try:
-            return subprocess.check_output("gh auth token", shell=True).decode().strip()
+            token = (
+                subprocess.check_output("gh auth token", shell=True).decode().strip()
+            )
+            return token
         except Exception:
             pass
 
@@ -66,3 +100,67 @@ class GitHubService:
                     )
 
         return results
+
+    def __graphql(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        resp = self.graphql_client.post(
+            self.graphql_url,
+            json={"query": query, "variables": variables},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        if "errors" in payload:
+            raise RuntimeError(payload["errors"])
+        return payload
+
+    def get_all_repos_created_from_template(
+        self,
+        org_name: str,
+        template_full_name: str | None = None,
+    ) -> list[TemplateRepoHit]:
+        query = """
+        query($org:String!, $after:String) {
+          organization(login: $org) {
+            repositories(first: 100, after: $after, orderBy: {field: NAME, direction: ASC}) {
+              pageInfo { hasNextPage endCursor }
+              nodes {
+                nameWithOwner
+                url
+                templateRepository { nameWithOwner url }
+              }
+            }
+          }
+        }
+        """
+
+        hits: list[TemplateRepoHit] = []
+        after: Optional[str] = None
+
+        while True:
+            payload = self.__graphql(query, {"org": org_name, "after": after})
+            repos = payload["data"]["organization"]["repositories"]
+
+            for repo in repos["nodes"]:
+                templateRepo = repo.get("templateRepository")
+                if not templateRepo:
+                    continue
+                if (
+                    template_full_name
+                    and templateRepo["nameWithOwner"] != template_full_name
+                ):
+                    continue
+
+                hits.append(
+                    TemplateRepoHit(
+                        repo_full_name=repo["nameWithOwner"],
+                        repo_url=repo["url"],
+                        template_full_name=templateRepo["nameWithOwner"],
+                        template_url=templateRepo["url"],
+                    )
+                )
+
+            if not repos["pageInfo"]["hasNextPage"]:
+                break
+            after = repos["pageInfo"]["endCursor"]
+
+        return hits

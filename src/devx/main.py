@@ -2,6 +2,7 @@ import typer
 from services.github_service import GitHubService
 from rich import print
 import json
+from datetime import date
 
 app = typer.Typer()
 
@@ -31,5 +32,17 @@ def get_old_secrets(
     """Get secrets"""
     github_service = GitHubService(token)
     repos = github_service.get_old_secrets(org, team, age, ignore)
-
     print(json.dumps(repos, default=get_obj_dict))
+
+
+@app.command()
+def get_all_repos_created_from_template(
+    org: str,
+    template: str,
+    token: str = typer.Option(None),
+):
+    github_service = GitHubService(token)
+    repos = github_service.get_all_repos_created_from_template(org, template)
+
+    for repo in repos:
+        typer.echo(repo.repo_url)
